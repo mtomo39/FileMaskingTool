@@ -1,0 +1,34 @@
+{
+  "Mappings": {
+    "MemberNumber": {
+      "Path": ".\\maps\\member-number.tsv",
+      "Encoding": "932",
+      "KeyTrimMode": "None"
+    }
+  },
+  "Jobs": [
+    {
+      "InputPath": ".\\input\\member-number.dat",
+      "OutputPath": ".\\output\\member-number.masked.dat",
+      "Format": "FixedWidth",
+      "Mode": "Sample",
+      "SampleCount": 50,
+      "Seed": 20261004,
+      "Encoding": "932",
+      "Layout": {
+        "RecordWidthBytes": 3000,
+        "RecordTerminator": "None"
+      },
+      "Fields": [
+        {
+          "Name": "MemberNumber",
+          "StartByte": 5,
+          "ByteLength": 10,
+          "Mapping": "MemberNumber",
+          "TrimSpaces": "None",
+          "PadSpace": "Half"
+        }
+      ]
+    }
+  ]
+}
