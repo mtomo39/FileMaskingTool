@@ -124,6 +124,7 @@ $configModulePath = Join-Path $PSScriptRoot '..\src\Masking\Config.psm1'
 Import-Module -Force -ErrorAction Stop -Name $configModulePath
 Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Mapping.psm1')
 Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Transform.psm1')
+Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\FixedWidth.psm1')
 
 Invoke-TestCase 'CLI help exits successfully and prints usage' {
     $cliPath = Join-Path $PSScriptRoot '..\MaskingTool.ps1'
@@ -245,6 +246,12 @@ Invoke-TestCase 'configuration rejects fields beyond the record width' {
     Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'exceeds record width'
 }
 
+Invoke-TestCase 'configuration rejects an invalid fixed-width output terminator' {
+    $config = New-ValidTestConfig
+    $config.Jobs[0].Layout | Add-Member -NotePropertyName OutputTerminator -NotePropertyValue 'BAD'
+    Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'Unsupported fixed-width output terminator'
+}
+
 Invoke-TestCase 'Excel sheet coverage rejects unconfigured workbook sheets' {
     $configuredSheets = @(
         [pscustomobject]@{ Name = 'Data'; Role = 'Data' }
@@ -361,6 +368,202 @@ Invoke-TestCase 'field transformation rejects overflow and a non-divisible full-
     Assert-Throws {
         Convert-FieldValue 'short' $remainderRule $index $encoding
     } -ExpectedMessage 'cannot be filled exactly'
+}
+
+Invoke-TestCase 'fixed-width handler masks selected 3,000-byte records and preserves FILLER bytes' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'fixed-id-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $index = Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None'
+    $indexes = @{ MemberNumber = $index }
+
+    $inputPath = Join-Path $script:ConfigTestRoot 'fixed-3000.dat'
+    $outputPath = Join-Path $script:ConfigTestRoot 'fixed-3000.masked.dat'
+    $inputBytes = New-Object byte[] 6000
+    for ($i = 0; $i -lt $inputBytes.Length; $i++) { $inputBytes[$i] = 0x58 }
+    $sourceId = [System.Text.Encoding]::ASCII.GetBytes('1234567890')
+    [System.Buffer]::BlockCopy($sourceId, 0, $inputBytes, 4, 10)
+    [System.Buffer]::BlockCopy($sourceId, 0, $inputBytes, 3004, 10)
+    [System.IO.File]::WriteAllBytes($inputPath, $inputBytes)
+
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        OutputPath = $outputPath
+        Encoding = '932'
+        Layout = [pscustomobject]@{ RecordWidthBytes = 3000; RecordTerminator = 'None' }
+        Fields = @([pscustomobject]@{
+            Name = 'MemberNumber'; StartByte = 5; ByteLength = 10
+            Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half'
+        })
+    }
+    $selected = [int[]]@(1)
+    $result = Invoke-FixedWidthJob $job $indexes $selected $outputPath
+    $actual = [System.IO.File]::ReadAllBytes($outputPath)
+    Assert-Equal 3000 $actual.Length 'Selected output width'
+    Assert-Equal 1 $result.RecordsWritten 'Selected output record count'
+    Assert-Equal 0x58 $actual[0] 'FILLER byte'
+    Assert-Equal '0987654321' ([System.Text.Encoding]::ASCII.GetString($actual, 4, 10)) 'Mapped member number'
+
+    $repeatPath = Join-Path $script:ConfigTestRoot 'fixed-3000.repeat.dat'
+    [void](Invoke-FixedWidthJob $job $indexes $selected $repeatPath)
+    Assert-Equal ([Convert]::ToBase64String($actual)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($repeatPath))) 'Repeatable selected output'
+}
+
+Invoke-TestCase 'fixed-width handler can add terminators only to masked output' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'output-terminator-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $indexes = @{ MemberNumber = (Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None') }
+    $inputPath = Join-Path $script:ConfigTestRoot 'no-terminator-input.dat'
+    $outputPath = Join-Path $script:ConfigTestRoot 'with-terminator-output.dat'
+    $inputBytes = New-Object byte[] 20
+    [System.Buffer]::BlockCopy([System.Text.Encoding]::ASCII.GetBytes('1234567890'), 0, $inputBytes, 0, 10)
+    [System.Buffer]::BlockCopy([System.Text.Encoding]::ASCII.GetBytes('1234567890'), 0, $inputBytes, 10, 10)
+    [System.IO.File]::WriteAllBytes($inputPath, $inputBytes)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Encoding = '932'
+        Layout = [pscustomobject]@{
+            RecordWidthBytes = 10
+            RecordTerminator = 'None'
+            OutputTerminator = 'CRLF'
+        }
+        Fields = @([pscustomobject]@{
+            Name = 'MemberNumber'; StartByte = 1; ByteLength = 10
+            Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half'
+        })
+    }
+
+    [void](Invoke-FixedWidthJob $job $indexes ([int[]]@(0, 1)) $outputPath)
+    $actual = [System.IO.File]::ReadAllBytes($outputPath)
+    Assert-Equal 24 $actual.Length 'Output with inserted CRLF byte length'
+    Assert-Equal 13 $actual[10] 'Output CR byte'
+    Assert-Equal 10 $actual[11] 'Output LF byte'
+    Assert-Equal 13 $actual[22] 'Final output CR byte'
+    Assert-Equal 10 $actual[23] 'Final output LF byte'
+    Assert-Equal ([Convert]::ToBase64String($inputBytes)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($inputPath))) 'Source remains unchanged'
+}
+
+Invoke-TestCase 'fixed-width handler preserves LF and CRLF record terminators' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'terminated-id-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $index = Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None'
+    $indexes = @{ MemberNumber = $index }
+    $sourceId = [System.Text.Encoding]::ASCII.GetBytes('1234567890')
+    $replacement = [System.Text.Encoding]::ASCII.GetBytes('0987654321')
+
+    foreach ($terminatorName in @('LF', 'CRLF')) {
+        if ($terminatorName -eq 'LF') { $terminator = [byte[]]@(10) } else { $terminator = [byte[]]@(13, 10) }
+        $width = 150
+        $stride = $width + $terminator.Length
+        $inputBytes = New-Object byte[] ($stride * 2)
+        for ($i = 0; $i -lt $inputBytes.Length; $i++) { $inputBytes[$i] = 0x58 }
+        [System.Buffer]::BlockCopy($sourceId, 0, $inputBytes, 0, 10)
+        [System.Buffer]::BlockCopy($terminator, 0, $inputBytes, $width, $terminator.Length)
+        [System.Buffer]::BlockCopy($sourceId, 0, $inputBytes, $stride, 10)
+        [System.Buffer]::BlockCopy($terminator, 0, $inputBytes, $stride + $width, $terminator.Length)
+
+        $inputPath = Join-Path $script:ConfigTestRoot "$terminatorName-input.dat"
+        $outputPath = Join-Path $script:ConfigTestRoot "$terminatorName-output.dat"
+        [System.IO.File]::WriteAllBytes($inputPath, $inputBytes)
+        $job = [pscustomobject]@{
+            InputPath = $inputPath
+            Encoding = '932'
+            Layout = [pscustomobject]@{ RecordWidthBytes = $width; RecordTerminator = $terminatorName }
+            Fields = @([pscustomobject]@{
+                Name = 'MemberNumber'; StartByte = 1; ByteLength = 10
+                Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half'
+            })
+        }
+
+        [void](Invoke-FixedWidthJob $job $indexes ([int[]]@(0, 1)) $outputPath)
+        $actual = [System.IO.File]::ReadAllBytes($outputPath)
+        Assert-Equal $inputBytes.Length $actual.Length "$terminatorName output byte length"
+        Assert-Equal '0987654321' ([System.Text.Encoding]::ASCII.GetString($actual, 0, 10)) "$terminatorName first record value"
+        Assert-Equal $terminator[0] $actual[$width] "$terminatorName terminator byte"
+        Assert-Equal $terminator[$terminator.Length - 1] $actual[$stride - 1] "$terminatorName record stride"
+        Assert-Equal ([Convert]::ToBase64String($terminator)) ([Convert]::ToBase64String([byte[]]$actual[$width..($stride - 1)])) "$terminatorName terminator bytes"
+        Assert-Equal ([Convert]::ToBase64String($replacement)) ([Convert]::ToBase64String([byte[]]$actual[0..9])) "$terminatorName exact mapped bytes"
+    }
+}
+
+Invoke-TestCase 'fixed-width handler rejects malformed record sizes and terminators' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'malformed-id-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $indexes = @{ MemberNumber = (Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None') }
+    $inputPath = Join-Path $script:ConfigTestRoot 'malformed-fixed.dat'
+    $outputPath = Join-Path $script:ConfigTestRoot 'malformed-fixed-out.dat'
+
+    [System.IO.File]::WriteAllBytes($inputPath, [byte[]]@(1,2,3,4,5,6,7,8,9,10,11))
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Encoding = '932'
+        Layout = [pscustomobject]@{ RecordWidthBytes = 10; RecordTerminator = 'None' }
+        Fields = @([pscustomobject]@{
+            Name = 'MemberNumber'; StartByte = 1; ByteLength = 10
+            Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half'
+        })
+    }
+    Assert-Throws {
+        Invoke-FixedWidthJob $job $indexes ([int[]]@(0)) $outputPath
+    } -ExpectedMessage 'file size is not divisible by record stride'
+
+    [System.IO.File]::WriteAllBytes($inputPath, [byte[]]@(49,50,51,52,53,54,55,56,57,48,0))
+    $job.Layout.RecordWidthBytes = 10
+    $job.Layout.RecordTerminator = 'LF'
+    Assert-Throws {
+        Invoke-FixedWidthJob $job $indexes ([int[]]@(0)) $outputPath
+    } -ExpectedMessage 'record terminator mismatch'
+}
+
+Invoke-TestCase 'split member number maps ten digits once and scatters 3 plus 7 digits' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'split-id-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $indexes = @{ MemberNumber = (Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None') }
+    $inputPath = Join-Path $script:ConfigTestRoot 'split-id.dat'
+    $outputPath = Join-Path $script:ConfigTestRoot 'split-id.masked.dat'
+    $record = New-Object byte[] 40
+    for ($i = 0; $i -lt $record.Length; $i++) { $record[$i] = 0x58 }
+    [System.Buffer]::BlockCopy([System.Text.Encoding]::ASCII.GetBytes('123'), 0, $record, 0, 3)
+    [System.Buffer]::BlockCopy([System.Text.Encoding]::ASCII.GetBytes('4567890'), 0, $record, 20, 7)
+    [System.IO.File]::WriteAllBytes($inputPath, $record)
+
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Encoding = '932'
+        Layout = [pscustomobject]@{ RecordWidthBytes = 40; RecordTerminator = 'None' }
+        Fields = @([pscustomobject]@{
+            Name = 'MemberNumber'; ByteLength = 10; Mapping = 'MemberNumber'
+            TrimSpaces = 'None'; Segments = @(
+                [pscustomobject]@{ StartByte = 1; ByteLength = 3 },
+                [pscustomobject]@{ StartByte = 21; ByteLength = 7 }
+            )
+        })
+    }
+    [void](Invoke-FixedWidthJob $job $indexes ([int[]]@(0)) $outputPath)
+    $actual = [System.IO.File]::ReadAllBytes($outputPath)
+    Assert-Equal '098' ([System.Text.Encoding]::ASCII.GetString($actual, 0, 3)) 'Scattered prefix'
+    Assert-Equal '7654321' ([System.Text.Encoding]::ASCII.GetString($actual, 20, 7)) 'Scattered suffix'
+    Assert-Equal '0' ([System.Text.Encoding]::ASCII.GetString($actual, 0, 1)) 'Leading zero retention'
+    Assert-Equal 0x58 $actual[19] 'Intervening FILLER preservation'
+}
+
+Invoke-TestCase 'fixed-width handler rejects overlapping field ranges' {
+    $mappingPath = Join-Path $script:ConfigTestRoot 'overlap-id-map.tsv'
+    Set-Content -LiteralPath $mappingPath -Value "1234567890`t0987654321" -Encoding UTF8
+    $indexes = @{ MemberNumber = (Read-MappingTable $mappingPath ([System.Text.Encoding]::GetEncoding(932)) 'None') }
+    $inputPath = Join-Path $script:ConfigTestRoot 'overlap.dat'
+    [System.IO.File]::WriteAllBytes($inputPath, (New-Object byte[] 20))
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Encoding = '932'
+        Layout = [pscustomobject]@{ RecordWidthBytes = 20; RecordTerminator = 'None' }
+        Fields = @(
+            [pscustomobject]@{ Name = 'First'; StartByte = 1; ByteLength = 10; Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half' },
+            [pscustomobject]@{ Name = 'Second'; StartByte = 10; ByteLength = 10; Mapping = 'MemberNumber'; TrimSpaces = 'None'; PadSpace = 'Half' }
+        )
+    }
+    Assert-Throws {
+        Invoke-FixedWidthJob $job $indexes ([int[]]@(0)) (Join-Path $script:ConfigTestRoot 'overlap-out.dat')
+    } -ExpectedMessage 'Fixed-width fields overlap'
 }
 
 Remove-Item -LiteralPath $script:ConfigTestRoot -Recurse -Force

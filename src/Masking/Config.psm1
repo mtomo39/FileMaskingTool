@@ -289,6 +289,12 @@ function Test-MaskingConfig {
             if (@('None', 'LF', 'CRLF') -notcontains [string]$job.Layout.RecordTerminator) {
                 throw 'Unsupported fixed-width record terminator'
             }
+            if (
+                $job.Layout.PSObject.Properties['OutputTerminator'] -and
+                @('None', 'LF', 'CRLF') -notcontains [string]$job.Layout.OutputTerminator
+            ) {
+                throw 'Unsupported fixed-width output terminator'
+            }
             Test-FieldRules @($job.Fields) $mappingNames 'FixedWidth' $width $true
         }
         elseif ($job.Format -eq 'Csv') {
