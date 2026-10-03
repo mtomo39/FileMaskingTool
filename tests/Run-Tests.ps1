@@ -122,6 +122,8 @@ function Write-TestConfig {
 
 $configModulePath = Join-Path $PSScriptRoot '..\src\Masking\Config.psm1'
 Import-Module -Force -ErrorAction Stop -Name $configModulePath
+Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Mapping.psm1')
+Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Transform.psm1')
 
 Invoke-TestCase 'CLI help exits successfully and prints usage' {
     $cliPath = Join-Path $PSScriptRoot '..\MaskingTool.ps1'
@@ -250,6 +252,115 @@ Invoke-TestCase 'Excel sheet coverage rejects unconfigured workbook sheets' {
     Assert-Throws {
         Test-ExcelSheetCoverage @('Data', 'Hidden') $configuredSheets
     } -ExpectedMessage 'Missing configuration for worksheet'
+}
+
+Invoke-TestCase 'mapping table loads 300,000 entries into an ordinal index' {
+    $path = Join-Path $script:ConfigTestRoot 'large-map.tsv'
+    $writer = New-Object System.IO.StreamWriter($path, $false, [System.Text.Encoding]::UTF8)
+    try {
+        for ($i = 0; $i -lt 300000; $i++) {
+            $writer.WriteLine("$i`tMASK$i")
+        }
+    }
+    finally {
+        $writer.Dispose()
+    }
+
+    $index = Read-MappingTable $path ([System.Text.Encoding]::UTF8) 'None'
+    Assert-Equal 300000 $index.Count 'Mapping index count'
+    Assert-Equal 'MASK299999' (Get-MappedValue $index '299999' 'None') 'Last mapping lookup'
+    Assert-Equal $true $index.Comparer.Equals('ABC', 'ABC') 'Ordinal comparer identity'
+    Assert-Equal $false $index.Comparer.Equals('ABC', 'abc') 'Ordinal comparer case sensitivity'
+}
+
+Invoke-TestCase 'mapping table accepts duplicate normalized keys only when replacements agree' {
+    $samePath = Join-Path $script:ConfigTestRoot 'same-duplicate.tsv'
+    Set-Content -LiteralPath $samePath -Value @(" KEY`tMASK", "KEY `tMASK") -Encoding UTF8
+    $index = Read-MappingTable $samePath ([System.Text.Encoding]::UTF8) 'HalfAndFull'
+    Assert-Equal 1 $index.Count 'Normalized duplicate count'
+
+    $conflictPath = Join-Path $script:ConfigTestRoot 'conflicting-duplicate.tsv'
+    Set-Content -LiteralPath $conflictPath -Value @(" KEY`tMASK1", "KEY `tMASK2") -Encoding UTF8
+    Assert-Throws {
+        Read-MappingTable $conflictPath ([System.Text.Encoding]::UTF8) 'HalfAndFull'
+    } -ExpectedMessage 'Conflicting duplicate mapping key'
+}
+
+Invoke-TestCase 'mapping table rejects records without exactly two tab-separated columns' {
+    $noTabPath = Join-Path $script:ConfigTestRoot 'no-tab.tsv'
+    Set-Content -LiteralPath $noTabPath -Value 'key-only' -Encoding UTF8
+    Assert-Throws {
+        Read-MappingTable $noTabPath ([System.Text.Encoding]::UTF8) 'None'
+    } -ExpectedMessage 'exactly two tab-separated columns'
+
+    $manyTabPath = Join-Path $script:ConfigTestRoot 'many-tabs.tsv'
+    Set-Content -LiteralPath $manyTabPath -Value "key`tvalue`tthird" -Encoding UTF8
+    Assert-Throws {
+        Read-MappingTable $manyTabPath ([System.Text.Encoding]::UTF8) 'None'
+    } -ExpectedMessage 'exactly two tab-separated columns'
+}
+
+Invoke-TestCase 'mapping lookup trims half- and full-width spaces on keys and input values' {
+    $path = Join-Path $script:ConfigTestRoot 'trim-map.tsv'
+    $fullSpace = [string][char]0x3000
+    Set-Content -LiteralPath $path -Value (" $fullSpace" + "KEY$fullSpace `tMASK") -Encoding UTF8
+    $index = Read-MappingTable $path ([System.Text.Encoding]::UTF8) 'HalfAndFull'
+    Assert-Equal 'MASK' (Get-MappedValue $index ($fullSpace + ' KEY ' + $fullSpace) 'HalfAndFull') 'Trimmed lookup'
+}
+
+Invoke-TestCase 'mapping lookup fails closed for an unknown key' {
+    $path = Join-Path $script:ConfigTestRoot 'unknown-map.tsv'
+    Set-Content -LiteralPath $path -Value "known`tMASK" -Encoding UTF8
+    $index = Read-MappingTable $path ([System.Text.Encoding]::UTF8) 'None'
+    Assert-Throws { Get-MappedValue $index 'unknown' 'None' } -ExpectedMessage 'Mapping key not found'
+}
+
+Invoke-TestCase 'field transformation pads half-width and full-width spaces by encoded byte count' {
+    $path = Join-Path $script:ConfigTestRoot 'padding-map.tsv'
+    $changed = [string][char]0x5909
+    $swap = [string][char]0x63DB
+    $fullSpace = [string][char]0x3000
+    Set-Content -LiteralPath $path -Value @(
+        "kana`tMASK",
+        ("kanji`t" + $changed + $swap),
+        "exact`t12345678",
+        "short`tA",
+        "long`t123456789"
+    ) -Encoding UTF8
+    $encoding = [System.Text.Encoding]::GetEncoding(932)
+    $index = Read-MappingTable $path ([System.Text.Encoding]::UTF8) 'None'
+
+    $halfRule = [pscustomobject]@{ Name = 'Kana'; ByteLength = 8; TrimSpaces = 'HalfAndFull'; PadSpace = 'Half' }
+    $halfResult = Convert-FieldValue (" kana" + $fullSpace) $halfRule $index $encoding
+    Assert-Equal 8 $halfResult.Length 'Half-space padded byte length'
+    Assert-Equal 'MASK    ' $encoding.GetString($halfResult) 'Half-space padded value'
+
+    $fullRule = [pscustomobject]@{ Name = 'Kanji'; ByteLength = 8; TrimSpaces = 'None'; PadSpace = 'Full' }
+    $fullResult = Convert-FieldValue 'kanji' $fullRule $index $encoding
+    Assert-Equal 8 $fullResult.Length 'Full-space padded byte length'
+    Assert-Equal ($changed + $swap + $fullSpace + $fullSpace) $encoding.GetString($fullResult) 'Full-space padded value'
+
+    $exactRule = [pscustomobject]@{ Name = 'Exact'; ByteLength = 8; TrimSpaces = 'None'; PadSpace = 'Half' }
+    Assert-Equal 8 (Convert-FieldValue 'exact' $exactRule $index $encoding).Length 'Exact-fit byte length'
+}
+
+Invoke-TestCase 'field transformation rejects overflow and a non-divisible full-space remainder' {
+    $path = Join-Path $script:ConfigTestRoot 'width-map.tsv'
+    Set-Content -LiteralPath $path -Value @(
+        "short`tA",
+        "long`t123456789"
+    ) -Encoding UTF8
+    $encoding = [System.Text.Encoding]::GetEncoding(932)
+    $index = Read-MappingTable $path ([System.Text.Encoding]::UTF8) 'None'
+    $overflowRule = [pscustomobject]@{ Name = 'Overflow'; ByteLength = 8; TrimSpaces = 'None'; PadSpace = 'Half' }
+    Assert-Throws {
+        Convert-FieldValue 'long' $overflowRule $index $encoding
+    } -ExpectedMessage 'exceeds field width'
+
+    $remainderRule = [pscustomobject]@{ Name = 'Remainder'; ByteLength = 2; TrimSpaces = 'None'; PadSpace = 'Full' }
+    Assert-Throws {
+        Convert-FieldValue 'short' $remainderRule $index $encoding
+    } -ExpectedMessage 'cannot be filled exactly'
 }
 
 Remove-Item -LiteralPath $script:ConfigTestRoot -Recurse -Force
