@@ -125,6 +125,7 @@ Import-Module -Force -ErrorAction Stop -Name $configModulePath
 Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Mapping.psm1')
 Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Transform.psm1')
 Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\FixedWidth.psm1')
+Import-Module -Force -ErrorAction Stop -Name (Join-Path $PSScriptRoot '..\src\Masking\Csv.psm1')
 
 Invoke-TestCase 'CLI help exits successfully and prints usage' {
     $cliPath = Join-Path $PSScriptRoot '..\MaskingTool.ps1'
@@ -220,10 +221,31 @@ Invoke-TestCase 'configuration rejects unknown format and mode' {
     Assert-Throws { Test-MaskingConfig $modeConfig } -ExpectedMessage 'Unsupported mode'
 }
 
-Invoke-TestCase 'configuration rejects non-positive sample counts' {
+Invoke-TestCase 'configuration rejects invalid sample counts and seeds' {
     $config = New-ValidTestConfig
     $config.Jobs[0].SampleCount = 0
     Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'SampleCount must be positive'
+
+    $config = New-ValidTestConfig
+    $config.Jobs[0].Seed = 'not-an-integer'
+    Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'Seed must be a 32-bit integer'
+}
+
+Invoke-TestCase 'configuration rejects NUL-padded CSV without explicit padding or compatible encoding' {
+    $config = New-ValidTestConfig
+    $config.Jobs[0].Format = 'Csv'
+    $config.Jobs[0].Fields = @([pscustomobject]@{
+        Name = 'MemberNumber'; ColumnIndex = 1; Mapping = 'MemberNumber'; TrimSpaces = 'None'
+    })
+    $config.Jobs[0].Layout = [pscustomobject]@{
+        Delimiter = ','; Quote = '"'; Header = $false
+        ContainerMode = 'FixedWidthNullPadded'; RecordWidthBytes = 10; RecordTerminator = 'None'
+    }
+    Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'CSV NullPadByte must be zero'
+
+    $config.Jobs[0].Layout | Add-Member -NotePropertyName NullPadByte -NotePropertyValue 0
+    $config.Jobs[0].Encoding = 'Unicode'
+    Assert-Throws { Test-MaskingConfig $config } -ExpectedMessage 'does not support UTF-16 or UTF-32'
 }
 
 Invoke-TestCase 'configuration rejects overlapping fixed-width fields' {
@@ -564,6 +586,239 @@ Invoke-TestCase 'fixed-width handler rejects overlapping field ranges' {
     Assert-Throws {
         Invoke-FixedWidthJob $job $indexes ([int[]]@(0)) (Join-Path $script:ConfigTestRoot 'overlap-out.dat')
     } -ExpectedMessage 'Fixed-width fields overlap'
+}
+
+Invoke-TestCase 'CSV parser preserves quote states and quoted delimiters, newlines, and escaped quotes' {
+    $csvText = '"a,b",plain,"a""b",,"line1' + "`r`n" + 'line2"' + "`r`n" + 'unquoted,"end"' + "`n"
+    $reader = [System.IO.StringReader]::new($csvText)
+    $records = @(Read-CsvRecords $reader ([char]',') ([char]'"'))
+    Assert-Equal 2 $records.Count 'Logical CSV record count'
+    Assert-Equal 5 $records[0].Fields.Count 'First record field count'
+    Assert-Equal 'a,b' $records[0].Fields[0].Value 'Quoted delimiter value'
+    Assert-Equal $true $records[0].Fields[0].WasQuoted 'Quoted delimiter flag'
+    Assert-Equal 'plain' $records[0].Fields[1].Value 'Unquoted value'
+    Assert-Equal $false $records[0].Fields[1].WasQuoted 'Unquoted flag'
+    Assert-Equal 'a"b' $records[0].Fields[2].Value 'Escaped quote value'
+    Assert-Equal ('line1' + "`r`n" + 'line2') $records[0].Fields[4].Value 'Quoted newline value'
+    Assert-Equal "`r`n" $records[0].Terminator 'CRLF record terminator'
+    Assert-Equal "`n" $records[1].Terminator 'LF record terminator'
+    $reader.Dispose()
+}
+
+Invoke-TestCase 'CSV parser rejects malformed quote placement' {
+    foreach ($text in @('"unterminated', 'left"right', '"closed"tail')) {
+        $reader = [System.IO.StringReader]::new($text)
+        try {
+            Assert-Throws { Read-CsvRecords $reader ([char]',') ([char]'"') } -ExpectedMessage 'CSV'
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+}
+
+Invoke-TestCase 'CSV writer preserves quote state and rejects newly required quoting' {
+    $record = [pscustomobject]@{
+        Fields = @(
+            [pscustomobject]@{ Value = 'a,b'; WasQuoted = $true },
+            [pscustomobject]@{ Value = 'plain'; WasQuoted = $false },
+            [pscustomobject]@{ Value = 'a"b'; WasQuoted = $true }
+        )
+    }
+    Assert-Equal '"a,b",plain,"a""b"' (Write-CsvRecord $record ([char]',') ([char]'"')) 'Serialized quote state'
+
+    $unquotedDelimiter = [pscustomobject]@{ Fields = @([pscustomobject]@{ Value = 'needs,quote'; WasQuoted = $false }) }
+    Assert-Throws { Write-CsvRecord $unquotedDelimiter ([char]',') ([char]'"') } -ExpectedMessage 'Unquoted CSV field requires quoting'
+    $unquotedQuote = [pscustomobject]@{ Fields = @([pscustomobject]@{ Value = 'needs"quote'; WasQuoted = $false }) }
+    Assert-Throws { Write-CsvRecord $unquotedQuote ([char]',') ([char]'"') } -ExpectedMessage 'Unquoted CSV field requires quoting'
+}
+
+Invoke-TestCase 'CSV job masks configured columns without changing quote state or row terminators' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'csv-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value @(
+        "001`t999",
+        "Alice`tMASK, Person",
+        "002`t888",
+        "Bob`tBOB"
+    ) -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'ordinary.csv'
+    $outputPath = Join-Path $script:ConfigTestRoot 'ordinary.masked.csv'
+    $inputText = '"ID","Name"' + "`r`n" + '"001","Alice"' + "`r`n" + '002,Bob'
+    [System.IO.File]::WriteAllText($inputPath, $inputText, [System.Text.Encoding]::UTF8)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Mode = 'All'
+        Encoding = 'UTF-8'
+        Layout = [pscustomobject]@{ Delimiter = ','; Quote = '"'; Header = $true; ContainerMode = 'Records' }
+        Fields = @(
+            [pscustomobject]@{ Name = 'MemberNumber'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' },
+            [pscustomobject]@{ Name = 'Name'; ColumnName = 'Name'; Mapping = 'Values'; TrimSpaces = 'HalfAndFull' }
+        )
+    }
+
+    $result = Invoke-CsvJob $job $mappingIndexes $outputPath
+    $actualText = [System.IO.File]::ReadAllText($outputPath, [System.Text.Encoding]::UTF8)
+    $expectedText = '"ID","Name"' + "`r`n" + '"999","MASK, Person"' + "`r`n" + '888,BOB'
+    Assert-Equal $expectedText $actualText 'CSV logical output'
+    Assert-Equal 2 $result.RecordsWritten 'CSV data records written'
+}
+
+Invoke-TestCase 'CSV job rejects data rows whose column count differs from the header' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'header-width-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value "x`tX" -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'header-width.csv'
+    $outputPath = Join-Path $script:ConfigTestRoot 'header-width.masked.csv'
+    [System.IO.File]::WriteAllText($inputPath, "First,Second`n" + 'x', [System.Text.Encoding]::UTF8)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath; Mode = 'All'; Encoding = 'UTF-8'
+        Layout = [pscustomobject]@{ Delimiter = ','; Quote = '"'; Header = $true; ContainerMode = 'Records' }
+        Fields = @([pscustomobject]@{ Name = 'Value'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' })
+    }
+
+    Assert-Throws { Invoke-CsvJob $job $mappingIndexes $outputPath } -ExpectedMessage 'inconsistent column count'
+    Assert-Equal $false (Test-Path -LiteralPath $outputPath) 'Invalid-column-count output is not published'
+}
+
+Invoke-TestCase 'CSV fixed-width NUL-padded mode re-pads each record to the same byte width' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'padded-csv-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value @(
+        "001`t12345",
+        "Alice`tBob",
+        "002`t999",
+        "Bob`tLonger"
+    ) -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'padded.csv'
+    $outputPath = Join-Path $script:ConfigTestRoot 'padded.masked.csv'
+    $width = 32
+    $term = [byte[]]@(13, 10)
+    $payloads = @('"001",Alice', '002,"Bob"')
+    $inputBytes = New-Object byte[] (($width + $term.Length) * $payloads.Count)
+    for ($i = 0; $i -lt $payloads.Count; $i++) {
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($payloads[$i])
+        [System.Buffer]::BlockCopy($payload, 0, $inputBytes, $i * ($width + $term.Length), $payload.Length)
+        [System.Buffer]::BlockCopy($term, 0, $inputBytes, $i * ($width + $term.Length) + $width, $term.Length)
+    }
+    [System.IO.File]::WriteAllBytes($inputPath, $inputBytes)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Mode = 'All'
+        Encoding = 'UTF-8'
+        Layout = [pscustomobject]@{
+            Delimiter = ','
+            Quote = '"'
+            Header = $false
+            ContainerMode = 'FixedWidthNullPadded'
+            RecordWidthBytes = $width
+            NullPadByte = 0
+            RecordTerminator = 'CRLF'
+        }
+        Fields = @(
+            [pscustomobject]@{ Name = 'MemberNumber'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' },
+            [pscustomobject]@{ Name = 'Name'; ColumnIndex = 2; Mapping = 'Values'; TrimSpaces = 'None' }
+        )
+    }
+
+    [void](Invoke-CsvJob $job $mappingIndexes $outputPath)
+    $actual = [System.IO.File]::ReadAllBytes($outputPath)
+    Assert-Equal $inputBytes.Length $actual.Length 'Fixed-width CSV output length'
+    $firstPayloadEnd = [Array]::IndexOf($actual, [byte]0, 0)
+    $firstPayload = [System.Text.Encoding]::UTF8.GetString($actual, 0, $firstPayloadEnd)
+    Assert-Equal '"12345",Bob' $firstPayload 'First transformed payload'
+    Assert-Equal 0 $actual[$firstPayloadEnd] 'First record NUL padding'
+    Assert-Equal 13 $actual[$width] 'First CRLF CR'
+    Assert-Equal 10 $actual[$width + 1] 'First CRLF LF'
+
+    $secondStart = $width + $term.Length
+    $secondPayloadEnd = [Array]::IndexOf($actual, [byte]0, $secondStart)
+    $secondPayload = [System.Text.Encoding]::UTF8.GetString($actual, $secondStart, $secondPayloadEnd - $secondStart)
+    Assert-Equal '999,"Longer"' $secondPayload 'Second transformed payload'
+    Assert-Equal 13 $actual[$secondStart + $width] 'Second CRLF CR'
+    Assert-Equal 10 $actual[$secondStart + $width + 1] 'Second CRLF LF'
+}
+
+Invoke-TestCase 'CSV fixed-width mode rejects output overflow and interior NUL bytes' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'overflow-csv-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value "x`t12345678" -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'overflow.csv'
+    $outputPath = Join-Path $script:ConfigTestRoot 'overflow.masked.csv'
+    $width = 8
+    $block = New-Object byte[] $width
+    $payload = [System.Text.Encoding]::UTF8.GetBytes('x,y')
+    [System.Buffer]::BlockCopy($payload, 0, $block, 0, $payload.Length)
+    [System.IO.File]::WriteAllBytes($inputPath, $block)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath
+        Mode = 'All'
+        Encoding = 'UTF-8'
+        Layout = [pscustomobject]@{
+            Delimiter = ','; Quote = '"'; Header = $false
+            ContainerMode = 'FixedWidthNullPadded'; RecordWidthBytes = $width
+            NullPadByte = 0; RecordTerminator = 'None'
+        }
+        Fields = @([pscustomobject]@{ Name = 'Value'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' })
+    }
+    Assert-Throws { Invoke-CsvJob $job $mappingIndexes $outputPath } -ExpectedMessage 'exceeds fixed-width CSV record payload'
+
+    $interior = [byte[]]@(120, 0, 44, 121, 0, 0, 0, 0)
+    [System.IO.File]::WriteAllBytes($inputPath, $interior)
+    Assert-Throws { Invoke-CsvJob $job $mappingIndexes $outputPath } -ExpectedMessage 'NUL byte occurs inside CSV payload'
+
+    $job.Encoding = 'Unicode'
+    Assert-Throws { Invoke-CsvJob $job $mappingIndexes $outputPath } -ExpectedMessage 'does not support UTF-16'
+}
+
+Invoke-TestCase 'CSV sample mode is deterministic and retains the header' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'sample-csv-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value @("a`tA", "b`tB", "c`tC", "d`tD") -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'sample.csv'
+    $inputText = 'Value' + "`n" + 'a' + "`n" + 'b' + "`n" + 'c' + "`n" + 'd' + "`n"
+    [System.IO.File]::WriteAllText($inputPath, $inputText, [System.Text.Encoding]::UTF8)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath; Mode = 'Sample'; SampleCount = 2; Seed = 123
+        Encoding = 'UTF-8'
+        Layout = [pscustomobject]@{ Delimiter = ','; Quote = '"'; Header = $true; ContainerMode = 'Records' }
+        Fields = @([pscustomobject]@{ Name = 'Value'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' })
+    }
+    $firstPath = Join-Path $script:ConfigTestRoot 'sample-one.csv'
+    $secondPath = Join-Path $script:ConfigTestRoot 'sample-two.csv'
+    [void](Invoke-CsvJob $job $mappingIndexes $firstPath)
+    [void](Invoke-CsvJob $job $mappingIndexes $secondPath)
+    $first = [System.IO.File]::ReadAllText($firstPath, [System.Text.Encoding]::UTF8)
+    $second = [System.IO.File]::ReadAllText($secondPath, [System.Text.Encoding]::UTF8)
+    Assert-Equal $first $second 'Deterministic sample content'
+    Assert-Equal 3 @($first.Split([char]"`n") | Where-Object { $_.Length -gt 0 }).Count 'Header and sampled row count'
+}
+
+Invoke-TestCase 'CSV rejects a byte-order mark that conflicts with the configured encoding' {
+    $mapPath = Join-Path $script:ConfigTestRoot 'bom-map.tsv'
+    Set-Content -LiteralPath $mapPath -Value "a`tA" -Encoding UTF8
+    $index = Read-MappingTable $mapPath ([System.Text.Encoding]::UTF8) 'None'
+    $mappingIndexes = @{ Values = $index }
+    $inputPath = Join-Path $script:ConfigTestRoot 'bom-input.csv'
+    $outputPath = Join-Path $script:ConfigTestRoot 'bom-output.csv'
+    $content = [System.Text.Encoding]::UTF8.GetBytes('a')
+    $inputBytes = New-Object byte[] (3 + $content.Length)
+    $inputBytes[0] = 0xEF; $inputBytes[1] = 0xBB; $inputBytes[2] = 0xBF
+    [System.Buffer]::BlockCopy($content, 0, $inputBytes, 3, $content.Length)
+    [System.IO.File]::WriteAllBytes($inputPath, $inputBytes)
+    $job = [pscustomobject]@{
+        InputPath = $inputPath; Mode = 'All'; Encoding = '932'
+        Layout = [pscustomobject]@{ Delimiter = ','; Quote = '"'; Header = $false; ContainerMode = 'Records' }
+        Fields = @([pscustomobject]@{ Name = 'Value'; ColumnIndex = 1; Mapping = 'Values'; TrimSpaces = 'None' })
+    }
+
+    Assert-Throws { Invoke-CsvJob $job $mappingIndexes $outputPath } -ExpectedMessage 'byte-order mark does not match'
+    Assert-Equal $false (Test-Path -LiteralPath $outputPath) 'Mismatched-encoding output is not created'
 }
 
 Remove-Item -LiteralPath $script:ConfigTestRoot -Recurse -Force

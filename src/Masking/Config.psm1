@@ -255,11 +255,13 @@ function Test-MaskingConfig {
             throw 'Unsupported mode'
         }
         if ($job.Mode -eq 'Sample') {
-            if ($null -eq $job.SampleCount -or [int]$job.SampleCount -le 0) {
+            $sampleCount = 0
+            if ($null -eq $job.SampleCount -or -not [int]::TryParse([string]$job.SampleCount, [ref]$sampleCount) -or $sampleCount -le 0) {
                 throw 'SampleCount must be positive in Sample mode'
             }
-            if ($null -eq $job.Seed) {
-                throw 'Seed is required in Sample mode'
+            $seed = 0
+            if ($null -eq $job.Seed -or -not [int]::TryParse([string]$job.Seed, [ref]$seed)) {
+                throw 'Seed must be a 32-bit integer in Sample mode'
             }
         }
 
@@ -312,11 +314,21 @@ function Test-MaskingConfig {
                 if ([int]$layout.RecordWidthBytes -le 0) {
                     throw 'CSV RecordWidthBytes must be positive'
                 }
-                if ([int]$layout.NullPadByte -ne 0) {
+                if (-not $layout.PSObject.Properties['NullPadByte'] -or [int]$layout.NullPadByte -ne 0) {
                     throw 'CSV NullPadByte must be zero'
                 }
                 if (@('None', 'LF', 'CRLF') -notcontains [string]$layout.RecordTerminator) {
                     throw 'Unsupported CSV record terminator'
+                }
+                $csvCodePage = 0
+                if ([int]::TryParse([string]$job.Encoding, [ref]$csvCodePage)) {
+                    $csvCodePage = [int]$job.Encoding
+                }
+                else {
+                    $csvCodePage = [System.Text.Encoding]::GetEncoding([string]$job.Encoding).CodePage
+                }
+                if (@(1200, 1201, 12000, 12001) -contains $csvCodePage) {
+                    throw 'Fixed-width NUL-padded CSV does not support UTF-16 or UTF-32 encodings'
                 }
             }
             elseif ([string]$layout.ContainerMode -ne 'Records') {

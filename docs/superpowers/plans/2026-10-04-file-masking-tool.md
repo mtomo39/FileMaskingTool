@@ -185,20 +185,20 @@ Expected: PASS with every output record preserving configured byte width and ter
 - Produces: `Invoke-CsvJob($Job, $MappingIndexes, [string] $TemporaryOutputPath) -> PSCustomObject`
 - CSV fixed-width mode uses `recordWidthBytes`, `recordTerminator`, and `nullPadByte=0`; `recordWidthBytes` excludes the terminator.
 
-- [ ] **Step 1: Write failing CSV tests**
+- [x] **Step 1: Write failing CSV tests**
 
 Cover quoted/unquoted fields, commas and line breaks inside quotes, doubled quotes, header preservation, exact quote-state preservation, error when an unquoted transformed value needs quoting, fixed-width NUL-padded blocks, CRLF/LF/no terminator, and output overflow.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL because the CSV parser and serializer are not implemented.
 
-- [ ] **Step 3: Implement a quote-aware CSV state machine and record writer**
+- [x] **Step 3: Implement a quote-aware CSV state machine and record writer**
 
 Retain each field's `WasQuoted` state while parsing and stream logical records rather than loading the entire CSV. In NUL-padded mode, read one exact-width byte block, validate the terminator, strip only terminal `0x00` padding, decode and parse the CSV payload, then encode and re-pad the serialized payload to the same width. Reject NUL inside the payload and never silently add quotes.
 
-- [ ] **Step 4: Run CSV tests**
+- [x] **Step 4: Run CSV tests**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: PASS with quote state, column count, terminator, and fixed record width preserved.
