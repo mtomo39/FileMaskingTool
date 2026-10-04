@@ -7,6 +7,7 @@ param(
 
 if ($Help) {
     Write-Output 'Usage: .\MaskingTool.ps1 -Config <path> [-ValidateOnly]'
+    Write-Output 'See README.md for supported formats, configuration examples, and operating guidance.'
     exit 0
 }
 
@@ -31,5 +32,44 @@ if ($ValidateOnly) {
     exit 0
 }
 
-Write-Error 'Job execution is not implemented yet; use -ValidateOnly.'
-exit 2
+$executionModules = @(
+    'Mapping.psm1',
+    'Transform.psm1',
+    'CompiledCore.psm1',
+    'FixedWidth.psm1',
+    'Csv.psm1',
+    'Excel.psm1',
+    'Report.psm1',
+    'Runner.psm1'
+)
+try {
+    foreach ($moduleName in $executionModules) {
+        $modulePath = Join-Path $PSScriptRoot ('src\Masking\' + $moduleName)
+        Import-Module -Force -ErrorAction Stop -Name $modulePath
+    }
+}
+catch {
+    Write-Error "Execution modules could not be loaded: $($_.Exception.Message)"
+    exit 2
+}
+
+try {
+    Import-MaskingCore
+}
+catch {
+    $jobResult = [pscustomobject]@{
+        Job = 0
+        Format = 'Preflight'
+        Status = 'Failed'
+        RecordsRead = 0
+        RecordsWritten = 0
+        ElapsedMilliseconds = 0
+        Error = ConvertTo-ValueFreeErrorMessage $_.Exception @()
+        Warnings = @()
+    }
+    Write-MaskingRunReport @($jobResult) 2 'PreflightFailed'
+    exit 2
+}
+
+$exitCode = Invoke-MaskingRun -Config $validatedConfig
+exit [int]$exitCode

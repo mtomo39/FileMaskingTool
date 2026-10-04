@@ -282,6 +282,18 @@ function Test-MaskingConfig {
         }
         $outputPaths[$outputPath] = $true
         Assert-ConfigEncoding ([string]$job.Encoding) 'Job Encoding'
+        if (@('FixedWidth', 'Csv') -contains [string]$job.Format) {
+            $jobCodePage = 0
+            if ([int]::TryParse([string]$job.Encoding, [ref]$jobCodePage)) {
+                $jobCodePage = [int]$job.Encoding
+            }
+            else {
+                $jobCodePage = [System.Text.Encoding]::GetEncoding([string]$job.Encoding).CodePage
+            }
+            if ($jobCodePage -ne 932) {
+                throw "$($job.Format) job Encoding must be cp932 (code page 932)"
+            }
+        }
 
         if ($job.Format -eq 'FixedWidth') {
             $width = [int]$job.Layout.RecordWidthBytes

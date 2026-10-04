@@ -444,6 +444,81 @@ function Invoke-CsvJob {
 
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { throw 'CSV output path is required' }
     if (-not (Test-Path -LiteralPath ([string]$Job.InputPath) -PathType Leaf)) { throw 'CSV input file does not exist' }
+    Import-MaskingCore
+    $fields = @($Job.Fields)
+    if ($fields.Count -eq 0) { throw 'CSV job must define fields' }
+    $fieldType = [FileMaskingTool.Core.CsvFieldRule]
+    $fieldRules = [Array]::CreateInstance($fieldType, $fields.Count)
+    for ($i = 0; $i -lt $fields.Count; $i++) {
+        $sourceField = $fields[$i]
+        $fieldRule = [Activator]::CreateInstance($fieldType)
+        $fieldRule.Name = [string]$sourceField.Name
+        $fieldRule.ColumnIndex = [int]$sourceField.ColumnIndex
+        if ($sourceField.PSObject.Properties['ColumnName']) {
+            $fieldRule.ColumnName = [string]$sourceField.ColumnName
+        }
+        $fieldRule.MappingName = [string]$sourceField.Mapping
+        $fieldRule.TrimSpaces = [string]$sourceField.TrimSpaces
+        $fieldRules.SetValue($fieldRule, $i)
+    }
+
+    $fixedWidth = [string]$Job.Layout.ContainerMode -eq 'FixedWidthNullPadded'
+    $terminator = [byte[]]@()
+    $recordWidth = 0
+    $nullPadByte = [byte]0
+    if ($fixedWidth) {
+        $recordWidth = [int]$Job.Layout.RecordWidthBytes
+        $terminator = Get-CsvTerminatorBytes ([string]$Job.Layout.RecordTerminator)
+        if ($Job.Layout.PSObject.Properties['NullPadByte']) {
+            $nullPadByte = [byte]$Job.Layout.NullPadByte
+        }
+    }
+    $encoding = Get-CsvEncoding ([string]$Job.Encoding)
+    $temporaryPath = $OutputPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $options = [Activator]::CreateInstance([FileMaskingTool.Core.CsvOptions])
+        $options.InputPath = [string]$Job.InputPath
+        $options.OutputPath = $temporaryPath
+        $options.Delimiter = [char][string]$Job.Layout.Delimiter
+        $options.Quote = [char][string]$Job.Layout.Quote
+        $options.Header = [bool]$Job.Layout.Header
+        $options.ContainerMode = if ([string]::IsNullOrWhiteSpace([string]$Job.Layout.ContainerMode)) { 'Records' } else { [string]$Job.Layout.ContainerMode }
+        $options.RecordWidthBytes = $recordWidth
+        $options.NullPadByte = $nullPadByte
+        $options.RecordTerminator = $terminator
+        $options.Encoding = $encoding
+        $options.Fields = $fieldRules
+        $options.Mode = if ([string]::IsNullOrWhiteSpace([string]$Job.Mode)) { 'All' } else { [string]$Job.Mode }
+        $options.SampleCount = if ($null -ne $Job.PSObject.Properties['SampleCount']) { [int]$Job.SampleCount } else { 0 }
+        $options.Seed = if ($null -ne $Job.PSObject.Properties['Seed']) { [int]$Job.Seed } else { 0 }
+        $result = [FileMaskingTool.Core.MaskingCore]::ProcessCsv($options, $MappingIndexes)
+        if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+            [System.IO.File]::Replace($temporaryPath, $OutputPath, $null)
+        }
+        else {
+            [System.IO.File]::Move($temporaryPath, $OutputPath)
+        }
+        return [pscustomobject]@{
+            RecordsRead = $result.RecordsRead
+            RecordsWritten = if ($fixedWidth) { $result.RecordsWritten } else { $result.DataRecordsWritten }
+            DataRecordsWritten = $result.DataRecordsWritten
+            ElapsedMilliseconds = $result.ElapsedMilliseconds
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+    }
+}
+
+function Invoke-CsvJobLegacy {
+    param(
+        [object] $Job,
+        [object] $MappingIndexes,
+        [string] $OutputPath
+    )
+
     $encoding = Get-CsvEncoding ([string]$Job.Encoding)
     $outputEncoding = Get-CsvOutputEncoding $encoding
     $delimiter = [char][string]$Job.Layout.Delimiter

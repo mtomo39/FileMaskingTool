@@ -4,12 +4,17 @@
       "Path": ".\\maps\\member-number.tsv",
       "Encoding": "932",
       "KeyTrimMode": "None"
+    },
+    "PersonName": {
+      "Path": ".\\maps\\person-name.tsv",
+      "Encoding": "932",
+      "KeyTrimMode": "HalfAndFull"
     }
   },
   "Jobs": [
     {
-      "InputPath": ".\\input\\member-number.dat",
-      "OutputPath": ".\\output\\member-number.masked.dat",
+      "InputPath": ".\\input\\member-number-3000.dat",
+      "OutputPath": ".\\output\\member-number-3000.sample.dat",
       "Format": "FixedWidth",
       "Mode": "Sample",
       "SampleCount": 50,
@@ -29,6 +34,152 @@
           "PadSpace": "Half"
         }
       ]
+    },
+    {
+      "InputPath": ".\\input\\member-number-150-crlf.dat",
+      "OutputPath": ".\\output\\member-number-150-crlf.masked.dat",
+      "Format": "FixedWidth",
+      "Mode": "All",
+      "Encoding": "932",
+      "Layout": {
+        "RecordWidthBytes": 150,
+        "RecordTerminator": "CRLF"
+      },
+      "Fields": [
+        {
+          "Name": "MemberNumber",
+          "ByteLength": 10,
+          "Mapping": "MemberNumber",
+          "TrimSpaces": "None",
+          "PadSpace": "Half",
+          "Segments": [
+            {
+              "StartByte": 5,
+              "ByteLength": 3
+            },
+            {
+              "StartByte": 30,
+              "ByteLength": 7
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "InputPath": ".\\input\\members.csv",
+      "OutputPath": ".\\output\\members.sample.csv",
+      "Format": "Csv",
+      "Mode": "Sample",
+      "SampleCount": 100,
+      "Seed": 20261004,
+      "Encoding": "932",
+      "Layout": {
+        "Delimiter": ",",
+        "Quote": "\"",
+        "Header": true,
+        "ContainerMode": "Records"
+      },
+      "Fields": [
+        {
+          "Name": "MemberNumber",
+          "ColumnName": "MemberNumber",
+          "Mapping": "MemberNumber",
+          "TrimSpaces": "None"
+        },
+        {
+          "Name": "PersonName",
+          "ColumnName": "Name",
+          "Mapping": "PersonName",
+          "TrimSpaces": "HalfAndFull"
+        }
+      ]
+    },
+    {
+      "InputPath": ".\\input\\members-padded.csv",
+      "OutputPath": ".\\output\\members-padded.masked.csv",
+      "Format": "Csv",
+      "Mode": "All",
+      "Encoding": "932",
+      "Layout": {
+        "Delimiter": ",",
+        "Quote": "\"",
+        "Header": false,
+        "ContainerMode": "FixedWidthNullPadded",
+        "RecordWidthBytes": 3000,
+        "NullPadByte": 0,
+        "RecordTerminator": "LF"
+      },
+      "Fields": [
+        {
+          "Name": "MemberNumber",
+          "ColumnIndex": 1,
+          "Mapping": "MemberNumber",
+          "TrimSpaces": "None"
+        }
+      ]
+    },
+    {
+      "InputPath": ".\\input\\member-workbook.xlsx",
+      "OutputPath": ".\\output\\member-workbook.sample.xlsx",
+      "Format": "Excel",
+      "Mode": "Sample",
+      "SampleCount": 100,
+      "Seed": 20261004,
+      "Encoding": "932",
+      "Layout": {
+        "Sheets": [
+          {
+            "Name": "Members",
+            "Role": "Data",
+            "HeaderRow": 1,
+            "FirstDataRow": 2,
+            "Fields": [
+              {
+                "Name": "MemberNumber",
+                "ColumnName": "MemberNumber",
+                "Mapping": "MemberNumber",
+                "TrimSpaces": "None"
+              },
+              {
+                "Name": "PersonName",
+                "ColumnName": "Name",
+                "Mapping": "PersonName",
+                "TrimSpaces": "HalfAndFull"
+              }
+            ]
+          },
+          {
+            "Name": "CodeList",
+            "Role": "NonPersonal",
+            "NonPersonalConfirmed": true
+          }
+        ]
+      }
+    },
+    {
+      "InputPath": ".\\input\\member-legacy.xls",
+      "OutputPath": ".\\output\\member-legacy.masked.xls",
+      "Format": "Excel",
+      "Mode": "All",
+      "Encoding": "932",
+      "Layout": {
+        "Sheets": [
+          {
+            "Name": "Members",
+            "Role": "Data",
+            "HeaderRow": 1,
+            "FirstDataRow": 2,
+            "Fields": [
+              {
+                "Name": "MemberNumber",
+                "ColumnName": "MemberNumber",
+                "Mapping": "MemberNumber",
+                "TrimSpaces": "None"
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

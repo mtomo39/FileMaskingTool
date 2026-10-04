@@ -171,17 +171,14 @@ function Transform-FixedWidthRecord {
         [int] $RecordNumber
     )
 
-    $transformed = New-Object byte[] $Record.Length
-    [System.Buffer]::BlockCopy($Record, 0, $transformed, 0, $Record.Length)
-
-    foreach ($field in $Fields) {
-        $mappingIndex = Get-FieldMappingIndex $MappingIndexes ([string]$field.Mapping) ([string]$field.Name)
+    foreach ($preparedField in $Fields) {
+        $field = $preparedField.Rule
+        $mappingIndex = $preparedField.MappingIndex
         if ($field.PSObject.Properties['Segments']) {
             $parts = New-Object 'System.Collections.Generic.List[string]'
             foreach ($segment in @($field.Segments)) {
-                $partBytes = Get-FixedFieldBytes $Record ([int]$segment.StartByte) ([int]$segment.ByteLength)
                 try {
-                    $part = $Encoding.GetString($partBytes)
+                    $part = $Encoding.GetString($Record, ([int]$segment.StartByte - 1), [int]$segment.ByteLength)
                 }
                 catch [System.Text.DecoderFallbackException] {
                     throw "Record $RecordNumber field $($field.Name) contains invalid encoded bytes"
@@ -219,14 +216,13 @@ function Transform-FixedWidthRecord {
                 if ($partBytes.Length -ne $segmentWidth) {
                     throw "Record $RecordNumber field $($field.Name) replacement segment has an invalid byte width"
                 }
-                Set-FixedFieldBytes $transformed ([int]$segment.StartByte) $partBytes
+                Set-FixedFieldBytes $Record ([int]$segment.StartByte) $partBytes
                 $cursor += $segmentWidth
             }
         }
         else {
-            $fieldBytes = Get-FixedFieldBytes $Record ([int]$field.StartByte) ([int]$field.ByteLength)
             try {
-                $value = $Encoding.GetString($fieldBytes)
+                $value = $Encoding.GetString($Record, ([int]$field.StartByte - 1), [int]$field.ByteLength)
                 $replacementBytes = Convert-FieldValue $value $field $mappingIndex $Encoding
             }
             catch [System.Text.DecoderFallbackException] {
@@ -238,11 +234,11 @@ function Transform-FixedWidthRecord {
             if ($replacementBytes.Length -ne [int]$field.ByteLength) {
                 throw "Record $RecordNumber field $($field.Name) output has an invalid byte width"
             }
-            Set-FixedFieldBytes $transformed ([int]$field.StartByte) $replacementBytes
+            Set-FixedFieldBytes $Record ([int]$field.StartByte) $replacementBytes
         }
     }
 
-    return ,$transformed
+    return ,$Record
 }
 
 function Invoke-FixedWidthJob {
@@ -253,17 +249,37 @@ function Invoke-FixedWidthJob {
         [string] $TemporaryOutputPath
     )
 
-    $recordWidth = [int]$Job.Layout.RecordWidthBytes
-    if ($recordWidth -le 0) {
-        throw 'RecordWidthBytes must be positive'
-    }
+    Import-MaskingCore
+    $coreType = [FileMaskingTool.Core.MaskingCore]
     $fields = @($Job.Fields)
-    if ($fields.Count -eq 0) {
-        throw 'Fixed-width job must define fields'
-    }
-    $ranges = Get-FixedWidthRanges $fields $recordWidth
-    foreach ($field in $fields) {
-        [void](Get-FieldMappingIndex $MappingIndexes ([string]$field.Mapping) ([string]$field.Name))
+    $fieldType = [FileMaskingTool.Core.FieldRule]
+    $fieldRules = [Array]::CreateInstance($fieldType, $fields.Count)
+    for ($i = 0; $i -lt $fields.Count; $i++) {
+        $sourceField = $fields[$i]
+        $fieldRule = [Activator]::CreateInstance($fieldType)
+        $fieldRule.Name = [string]$sourceField.Name
+        $fieldRule.StartByte = [int]$sourceField.StartByte
+        $fieldRule.ByteLength = [int]$sourceField.ByteLength
+        $fieldRule.MappingName = [string]$sourceField.Mapping
+        $fieldRule.TrimSpaces = [string]$sourceField.TrimSpaces
+        $fieldRule.PadSpace = [string]$sourceField.PadSpace
+
+        $sourceSegments = @()
+        if ($sourceField.PSObject.Properties['Segments']) {
+            $sourceSegments = @($sourceField.Segments)
+        }
+        if ($sourceSegments.Count -gt 0) {
+            $segmentType = [FileMaskingTool.Core.SegmentRule]
+            $segments = [Array]::CreateInstance($segmentType, $sourceSegments.Count)
+            for ($segmentIndex = 0; $segmentIndex -lt $sourceSegments.Count; $segmentIndex++) {
+                $segment = [Activator]::CreateInstance($segmentType)
+                $segment.StartByte = [int]$sourceSegments[$segmentIndex].StartByte
+                $segment.ByteLength = [int]$sourceSegments[$segmentIndex].ByteLength
+                $segments.SetValue($segment, $segmentIndex)
+            }
+            $fieldRule.Segments = $segments
+        }
+        $fieldRules.SetValue($fieldRule, $i)
     }
 
     $terminator = Get-FixedWidthTerminator ([string]$Job.Layout.RecordTerminator)
@@ -273,117 +289,28 @@ function Invoke-FixedWidthJob {
     else {
         $outputTerminator = $terminator
     }
-    $stride = [long]$recordWidth + $terminator.Length
-    $fileLength = (Get-Item -LiteralPath $Job.InputPath -ErrorAction Stop).Length
-    if (($fileLength % $stride) -ne 0) {
-        throw 'File size is not divisible by record stride'
+    $options = [Activator]::CreateInstance([FileMaskingTool.Core.FixedWidthOptions])
+    $options.InputPath = [string]$Job.InputPath
+    $options.OutputPath = $TemporaryOutputPath
+    $options.RecordWidthBytes = [int]$Job.Layout.RecordWidthBytes
+    $options.InputTerminator = [byte[]]$terminator
+    $options.OutputTerminator = [byte[]]$outputTerminator
+    $options.Encoding = Get-FixedWidthEncoding ([string]$Job.Encoding)
+    $options.Fields = $fieldRules
+    $options.Mode = if ([string]::IsNullOrWhiteSpace([string]$Job.Mode)) { 'All' } else { [string]$Job.Mode }
+    $options.SampleCount = if ($null -ne $Job.PSObject.Properties['SampleCount']) { [int]$Job.SampleCount } else { 0 }
+    $options.Seed = if ($null -ne $Job.PSObject.Properties['Seed']) { [int]$Job.Seed } else { 0 }
+    if ($null -ne $SelectedRecordIndexes) {
+        $options.SelectedRecordIndexes = [int[]]$SelectedRecordIndexes
     }
-    $recordCount = [int]($fileLength / $stride)
-    if ($recordCount -eq 0) {
-        throw 'Fixed-width input contains no records'
-    }
 
-    $encodingName = [string]$Job.Encoding
-    $encoding = Get-FixedWidthEncoding $encodingName
-
-    $inputStream = [System.IO.File]::Open(
-        $Job.InputPath,
-        [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read,
-        [System.IO.FileShare]::Read
-    )
-    $outputStream = $null
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        if ($terminator.Length -gt 0) {
-            for ($recordNumber = 0; $recordNumber -lt $recordCount; $recordNumber++) {
-                $inputStream.Position = ([long]$recordNumber * $stride) + $recordWidth
-                $actualTerminator = Read-FixedBytes $inputStream $terminator.Length "record $($recordNumber + 1) terminator"
-                if (-not (Test-FixedBytesEqual $actualTerminator $terminator)) {
-                    throw "Record $($recordNumber + 1) record terminator mismatch"
-                }
-            }
-        }
-        $inputStream.Position = 0
-
-        if ($null -eq $SelectedRecordIndexes) {
-            $selected = $null
-            $recordsToWrite = $recordCount
-        }
-        else {
-            if ($SelectedRecordIndexes.Count -eq 0) {
-                throw 'SelectedRecordIndexes cannot be empty'
-            }
-            $seen = New-Object 'System.Collections.Generic.HashSet[int]'
-            foreach ($recordIndex in $SelectedRecordIndexes) {
-                if ($recordIndex -lt 0 -or $recordIndex -ge $recordCount) {
-                    throw 'Selected record index is outside the input file'
-                }
-                if (-not $seen.Add($recordIndex)) {
-                    throw 'Selected record indexes contain duplicates'
-                }
-            }
-            $selected = [int[]]$SelectedRecordIndexes.Clone()
-            [System.Array]::Sort($selected)
-            $recordsToWrite = $selected.Length
-        }
-
-        $outputStream = [System.IO.File]::Open(
-            $TemporaryOutputPath,
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::None
-        )
-
-        if ($null -eq $selected) {
-            for ($recordIndex = 0; $recordIndex -lt $recordCount; $recordIndex++) {
-                $record = Read-FixedBytes $inputStream $recordWidth "record $($recordIndex + 1)"
-                if ($terminator.Length -gt 0) {
-                    $actualTerminator = Read-FixedBytes $inputStream $terminator.Length "record $($recordIndex + 1) terminator"
-                    if (-not (Test-FixedBytesEqual $actualTerminator $terminator)) {
-                        throw "Record $($recordIndex + 1) record terminator mismatch"
-                    }
-                }
-                $transformed = Transform-FixedWidthRecord $record $fields $MappingIndexes $encoding ($recordIndex + 1)
-                $outputStream.Write($transformed, 0, $transformed.Length)
-                if ($outputTerminator.Length -gt 0) {
-                    $outputStream.Write($outputTerminator, 0, $outputTerminator.Length)
-                }
-            }
-        }
-        else {
-            foreach ($recordIndex in $selected) {
-                $inputStream.Position = [long]$recordIndex * $stride
-                $record = Read-FixedBytes $inputStream $recordWidth "record $($recordIndex + 1)"
-                if ($terminator.Length -gt 0) {
-                    $actualTerminator = Read-FixedBytes $inputStream $terminator.Length "record $($recordIndex + 1) terminator"
-                    if (-not (Test-FixedBytesEqual $actualTerminator $terminator)) {
-                        throw "Record $($recordIndex + 1) record terminator mismatch"
-                    }
-                }
-                $transformed = Transform-FixedWidthRecord $record $fields $MappingIndexes $encoding ($recordIndex + 1)
-                $outputStream.Write($transformed, 0, $transformed.Length)
-                if ($outputTerminator.Length -gt 0) {
-                    $outputStream.Write($outputTerminator, 0, $outputTerminator.Length)
-                }
-            }
-        }
-
-        $outputStream.Flush()
-        $stopwatch.Stop()
-        return [pscustomobject]@{
-            RecordsRead       = $recordsToWrite
-            RecordsWritten    = $recordsToWrite
-            RecordsInSource   = $recordCount
-            FieldsTransformed = $recordsToWrite * $fields.Count
-            ElapsedMilliseconds = $stopwatch.ElapsedMilliseconds
-        }
-    }
-    finally {
-        if ($null -ne $outputStream) {
-            $outputStream.Dispose()
-        }
-        $inputStream.Dispose()
+    $result = $coreType::ProcessFixedWidth($options, $MappingIndexes)
+    return [pscustomobject]@{
+        RecordsRead         = $result.RecordsRead
+        RecordsWritten      = $result.RecordsWritten
+        RecordsInSource     = $result.RecordsInSource
+        FieldsTransformed   = $result.FieldsTransformed
+        ElapsedMilliseconds = $result.ElapsedMilliseconds
     }
 }
 

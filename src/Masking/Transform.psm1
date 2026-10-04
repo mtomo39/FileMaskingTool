@@ -1,17 +1,24 @@
+$script:StrictTransformEncodingCache = [System.Collections.Generic.Dictionary[int,System.Text.Encoding]]::new()
+
 function Get-StrictTransformEncoding {
     param([System.Text.Encoding] $Encoding)
 
     if ($null -eq $Encoding) {
         throw 'Field encoding is required'
     }
+    if ($script:StrictTransformEncodingCache.ContainsKey($Encoding.CodePage)) {
+        return $script:StrictTransformEncodingCache[$Encoding.CodePage]
+    }
 
     $encoderFallback = New-Object System.Text.EncoderExceptionFallback
     $decoderFallback = New-Object System.Text.DecoderExceptionFallback
-    return [System.Text.Encoding]::GetEncoding(
+    $strictEncoding = [System.Text.Encoding]::GetEncoding(
         $Encoding.CodePage,
         $encoderFallback,
         $decoderFallback
     )
+    $script:StrictTransformEncodingCache.Add($Encoding.CodePage, $strictEncoding)
+    return $strictEncoding
 }
 
 function Convert-FieldValue {

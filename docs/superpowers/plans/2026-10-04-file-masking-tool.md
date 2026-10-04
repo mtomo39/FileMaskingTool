@@ -97,7 +97,7 @@ Expected: PASS for help and clean imports.
 
 Cover a valid job; validation-only mode creating no output; missing input path; source/output path collision; unknown format/mode; invalid sample count; overlapping fixed-width fields; a field beyond `recordWidthBytes`; and missing configuration for any workbook sheet.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL because configuration functions are not implemented.
@@ -128,7 +128,7 @@ Expected: PASS for accepted and rejected configurations.
 
 Cover 300,000 synthetic mapping rows, duplicate identical and conflicting keys, two-column validation, half-/full-width space trimming on both lookup values and keys, missing-key failure, half-/full-width padding, exact-fit output, overflow, and non-divisible padding remainder.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL because mapping and transformation functions are not implemented.
@@ -215,20 +215,20 @@ Expected: PASS with quote state, column count, terminator, and fixed record widt
 - Job sheet rules identify every worksheet and designate its data range, sample/all behavior, target columns, and explicitly non-personal ranges.
 - The result reports per-sheet row counts and detected auxiliary-information warnings without cell values.
 
-- [ ] **Step 1: Write failing Excel integration tests**
+- [x] **Step 1: Write failing Excel integration tests**
 
 Generate synthetic `.xlsx` and `.xls` workbooks with multiple sheets, headers, formulas, formatting, hidden sheets, comments, hyperlinks, and target fields. Assert sample rows, formula-to-value conversion, masked cells, preserved sheet names/extension, warning reporting, and no source modification.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL because Excel processing is not implemented.
 
-- [ ] **Step 3: Implement guarded Excel COM processing**
+- [x] **Step 3: Implement guarded Excel COM processing**
 
 Create a separate Excel COM instance, disable macros/events, calculate before sampling, process only a staged copy, convert formulas in retained output ranges to values, preserve configured basic formatting, detect/report supported auxiliary content, save with the input workbook format, and close/release every COM object in `finally`.
 
-- [ ] **Step 4: Run Excel integration tests**
+- [ ] **Step 4: Run Excel integration tests** — BLOCKED in this host because Office Excel COM is not registered; the test reports BLOCKED and is not counted as passed.
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: PASS with Office 2024 installed; otherwise tests report an explicit environment prerequisite failure, not a pass.
@@ -246,7 +246,7 @@ Expected: PASS with Office 2024 installed; otherwise tests report an explicit en
 - Each format handler writes only to the provided temporary path and returns counts, elapsed time, and warnings without values.
 - Runner publishes the temporary output only after handler validation; failures remove only that job's temporary output.
 
-- [ ] **Step 1: Write failing runner tests**
+- [x] **Step 1: Write failing runner tests**
 
 Cover multi-job configurations, per-file sample/all modes, deterministic sample selection from seed, a failed file followed by a successful file, no source overwrite, temporary output cleanup on failure, final output publication only after validation, nonzero aggregate exit status after a partial failure, and sanitized logs/reports.
 
@@ -255,11 +255,11 @@ Cover multi-job configurations, per-file sample/all modes, deterministic sample 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL because runner and reporting functions are not implemented.
 
-- [ ] **Step 3: Implement orchestration and value-free reporting**
+- [x] **Step 3: Implement orchestration and value-free reporting**
 
 Preflight all configured jobs before processing. Load referenced maps once, dispatch each job, continue to subsequent jobs after a per-file failure, stage output under a unique same-volume temporary path, verify and publish each file independently, and record counts/timing/errors without any source, replacement, or cell values. Excel auxiliary warnings must be reported as warnings and must not be represented as proof of privacy.
 
-- [ ] **Step 4: Run runner tests**
+- [x] **Step 4: Run runner tests**
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: PASS with failed jobs returning nonzero exit status and no incomplete final output.
@@ -275,7 +275,7 @@ Expected: PASS with failed jobs returning nonzero exit status and no incomplete 
 - Produces: An example manifest for each supported input format and documented CLI invocation, exit codes, report fields, and Excel prerequisites.
 - Produces: A synthetic performance test that reports fixed-width/CSV throughput for 300,000 records and Excel timing separately.
 
-- [ ] **Step 1: Write failing documentation/config smoke tests**
+- [x] **Step 1: Write failing documentation/config smoke tests**
 
 Validate the example JSON against `Test-MaskingConfig`; assert help and README document no-newline fixed-width, 150-byte terminated records, quote-state behavior, NUL-padded CSV, split fixed-width member IDs, sample/all modes, and Excel `.xls`/`.xlsx` warnings.
 
@@ -284,11 +284,11 @@ Validate the example JSON against `Test-MaskingConfig`; assert help and README d
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: FAIL until the example and operating guide cover each required format and rule.
 
-- [ ] **Step 3: Complete examples, safety guidance, and synthetic benchmark command**
+- [x] **Step 3: Complete examples, safety guidance, and synthetic benchmark command**
 
 Document that the example contains synthetic paths/data only; warn that FILLER and unconfigured cells remain unchanged and that Excel auxiliary warnings do not guarantee absence of personal data.
 
-- [ ] **Step 4: Run the full test suite and synthetic benchmark**
+- [x] **Step 4: Run the full test suite and synthetic benchmark** — After moving the record loops into the in-memory compiled core, the full suite passes (Excel COM integration is BLOCKED in this environment) and the 300,000-record synthetic benchmark completes: fixed-width 0.379 s and CSV 0.303 s. These are measurements, not an SLA.
 
 Run: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1`
 Expected: PASS for all non-Excel tests; Excel integration passes with Office 2024 available. The benchmark prints record counts and elapsed time without reading or emitting production data.
